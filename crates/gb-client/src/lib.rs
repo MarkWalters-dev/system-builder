@@ -2,13 +2,14 @@
 //! and run the follow-up local `emerge`.
 
 pub mod config;
+pub mod specs;
 pub mod sse;
 pub mod state;
 
 use gb_types::{
     ApiError, BuildJob, BuildLog, BuildSummary, CreateBuildRequest, EstimateRequest,
-    EstimateResponse, HistoryResponse, JobState, QueueStatus, StreamEvent, SystemActiveBuild,
-    SystemInfo,
+    EstimateResponse, HistoryResponse, JobState, ProvisionRequest, ProvisionResponse, QueueStatus,
+    StreamEvent, SystemActiveBuild, SystemInfo,
 };
 use std::process::ExitStatus;
 use std::time::Duration;
@@ -122,6 +123,13 @@ impl Client {
 
     pub async fn systems(&self) -> Result<Vec<SystemInfo>, ClientError> {
         self.get_json("/v1/systems").await
+    }
+
+    pub async fn provision(
+        &self,
+        req: &ProvisionRequest,
+    ) -> Result<ProvisionResponse, ClientError> {
+        self.post_json("/v1/systems", req).await
     }
 
     pub async fn system_active(&self, system: &str) -> Result<SystemActiveBuild, ClientError> {

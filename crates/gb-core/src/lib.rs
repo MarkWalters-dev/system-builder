@@ -5,6 +5,7 @@ pub mod discover;
 pub mod history;
 pub mod manager;
 pub mod progress;
+pub mod provision;
 pub mod resolve;
 pub mod runner;
 

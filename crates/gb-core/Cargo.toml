@@ -19,6 +19,8 @@ regex = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 libc = { workspace = true }
+reqwest = { workspace = true }
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

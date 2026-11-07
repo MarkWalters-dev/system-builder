@@ -205,6 +205,41 @@ skips building the server and its dependencies entirely. See the
 [overlay README](https://github.com/MarkWalters-dev/mw-overlay) for
 setup alternatives (SSH, manual `repos.conf`).
 
+## Provisioning
+
+Builder images no longer need hand setup. On a new Gentoo client, run:
+
+```sh
+gb-client provision                    # system name defaults to the hostname
+gb-client provision --system laptop    # or pick a name explicitly
+```
+
+The client sends its Portage settings — `CHOST`, `CFLAGS` (a literal
+`-march=native` is resolved to the concrete CPU via gcc first),
+`CPU_FLAGS_X86` (from `emerge --info`, else `cpuid2cpuflags`), global
+`USE`, and the active profile — and the server creates
+`gentoo-builder-<name>` from scratch, then recompiles `@world` from
+source inside it with those exact settings. No foreign binpkgs: the
+image is fully client-tuned. Progress streams like any build (watch it
+with `gb-client watch <id>`, or pass `--no-watch`).
+
+What the server does per provision, in order: downloads the stage3 once
+into `/var/cache/system-builder` (SHA512-verified against the official
+`.DIGESTS`), unpacks it under `/var/lib/machines`, writes the client's
+`make.conf` (`COMMON_FLAGS`, `CPU_FLAGS_X86`, `USE`, `RUSTFLAGS`,
+`FEATURES=buildpkg`) plus a bind-mount `repos.conf` and the profile
+link, creates `/var/binserver/<name>` for the image's own binpkgs,
+writes the `.nspawn` file (host repo + distfiles shared, like the
+hand-built builders), starts the machine, and queues the recompile.
+Re-running for an existing system is a no-op (no job); a
+`.provisioned` marker tells complete images from interrupted ones.
+
+Fresh-host prerequisites: a synced host repo at `/var/db/repos/gentoo`
+(the image bind-mounts it and never syncs itself), root for the
+server, and systemd with `machinectl`. Tune under `[provision]`
+(`stage3_variant = "openrc"` or `"systemd"`, `cache_dir`,
+`binserver_root`). amd64 only for now.
+
 ## Client CLI
 
 `gb-client` runs on the client machines. It submits a remote build, streams it,
@@ -286,6 +321,7 @@ cancelled · `3` local emerge failed. Install it on clients with
 | GET | `/v1/builds/:id/stream` | SSE: `status`/`log`/`progress`/`done` events |
 | GET | `/v1/queue` | `{max_concurrent_builds, running, queued[], active[]}` |
 | GET | `/v1/systems` | systems with `idle`/`building` status |
+| POST | `/v1/systems` | provision: `{name, specs}` → system (+ recompile job unless it exists) |
 | GET | `/v1/systems/:system/active` | active (+queued) build for one system, with x-of-y progress |
 | POST | `/v1/estimates` | `{system, packages[]?, targets[]?}` → per-package + total estimates |
 | GET | `/v1/history?system=&package=` | samples/avg/median/min/max with fallback source |

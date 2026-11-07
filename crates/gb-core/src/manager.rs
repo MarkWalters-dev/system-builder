@@ -9,8 +9,9 @@
 
 use gb_types::{
     BuildJob, BuildLog, BuildProgress, BuildSummary, CreateBuildRequest, EstimateRequest,
-    EstimateResponse, HistoryResponse, JobState, PackageEstimate, QueueStatus, StreamEvent,
-    SystemActiveBuild, SystemInfo, SystemMode, SystemStatus,
+    EstimateResponse, HistoryResponse, JobState, PackageEstimate, ProvisionPlan, ProvisionRequest,
+    ProvisionResponse, QueueStatus, StreamEvent, SystemActiveBuild, SystemInfo, SystemMode,
+    SystemStatus,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -24,6 +25,7 @@ use crate::config::{Config, SystemConfig};
 use crate::discover;
 use crate::history::HistoryStore;
 use crate::progress::{LiveProgress, parse_pretend_plan};
+use crate::provision;
 use crate::resolve::{BlockResolver, ResolveError, resolve_with_retry};
 use crate::runner::{Runner, RunnerError, UPDATE_FLAGS};
 
@@ -37,6 +39,8 @@ pub enum ManagerError {
     UnknownJob(Uuid),
     #[error("build is already finished")]
     AlreadyFinished,
+    #[error("invalid provision request: {0}")]
+    InvalidProvision(String),
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -151,6 +155,7 @@ impl Manager {
             emerge_args,
             auto_fix_conflicts: req.auto_fix_conflicts.unwrap_or(true),
             unmerged_blockers: Vec::new(),
+            provision: None,
             state: JobState::Queued,
             queue_position: 0,
             progress: BuildProgress::default(),
@@ -162,6 +167,11 @@ impl Manager {
             started_at: None,
             finished_at: None,
         };
+        Ok(self.insert_queued(job).await)
+    }
+
+    /// Insert a fresh job as queued and wake the dispatcher.
+    async fn insert_queued(&self, job: BuildJob) -> BuildJob {
         let (bus, _) = broadcast::channel(2048);
         {
             // Lock order is always queue -> jobs (see refresh/next_runnable).
@@ -181,7 +191,62 @@ impl Manager {
         }
         self.refresh_queue_positions().await;
         self.inner.notify.notify_one();
-        Ok(self.get(job.id).await.expect("just inserted"))
+        self.get(job.id).await.expect("just inserted")
+    }
+
+    /// Provision a missing system: validate the request, return the
+    /// existing system when present (idempotent), else queue a job that
+    /// creates the image from scratch and then recompiles `@world`
+    /// inside it with the client's settings.
+    pub async fn provision(
+        &self,
+        req: ProvisionRequest,
+    ) -> Result<ProvisionResponse, ManagerError> {
+        let name = provision::validate_name(&req.name).map_err(ManagerError::InvalidProvision)?;
+        provision::validate_specs(&req.specs).map_err(ManagerError::InvalidProvision)?;
+        if let Some(sys) = self.resolve_system(&name).await {
+            return Ok(ProvisionResponse {
+                system: self.system_info(&sys).await,
+                job: None,
+            });
+        }
+        let now = chrono::Utc::now();
+        let image = format!("{}{}", self.inner.config.discovery.image_prefix, name);
+        let job = BuildJob {
+            id: Uuid::new_v4(),
+            system: name.clone(),
+            targets: vec!["@world".to_string()],
+            emerge_args: vec![
+                "--emptytree".to_string(),
+                "--deep".to_string(),
+                "--newuse".to_string(),
+                "--verbose".to_string(),
+            ],
+            auto_fix_conflicts: true,
+            unmerged_blockers: Vec::new(),
+            provision: Some(ProvisionPlan { specs: req.specs }),
+            state: JobState::Queued,
+            queue_position: 0,
+            progress: BuildProgress::default(),
+            plan: Vec::new(),
+            estimates: Vec::new(),
+            error: None,
+            exit_code: None,
+            created_at: now,
+            started_at: None,
+            finished_at: None,
+        };
+        let job = self.insert_queued(job).await;
+        Ok(ProvisionResponse {
+            system: SystemInfo {
+                name,
+                mode: SystemMode::Nspawn,
+                nspawn: Some(image),
+                status: SystemStatus::Idle,
+                active_build_id: None,
+            },
+            job: Some(job),
+        })
     }
 
     pub async fn get(&self, id: Uuid) -> Option<BuildJob> {
@@ -237,32 +302,174 @@ impl Manager {
 
     pub async fn systems(&self) -> Vec<SystemInfo> {
         let systems = self.effective_systems().await;
+        let mut out = Vec::with_capacity(systems.len());
+        for s in &systems {
+            out.push(self.system_info(s).await);
+        }
+        out
+    }
+
+    async fn system_info(&self, sys: &SystemConfig) -> SystemInfo {
         let jobs = self.inner.jobs.read().await;
-        systems
-            .iter()
-            .map(|s| {
-                let active_build_id = jobs
-                    .values()
-                    .map(|r| &r.job)
-                    .find(|j| j.system == s.name && j.state.is_active())
-                    .map(|j| j.id);
-                SystemInfo {
-                    name: s.name.clone(),
-                    mode: if s.is_host() {
-                        SystemMode::Host
-                    } else {
-                        SystemMode::Nspawn
-                    },
-                    nspawn: s.nspawn.clone(),
-                    status: if active_build_id.is_some() {
-                        SystemStatus::Building
-                    } else {
-                        SystemStatus::Idle
-                    },
-                    active_build_id,
-                }
-            })
-            .collect()
+        let active_build_id = jobs
+            .values()
+            .map(|r| &r.job)
+            .find(|j| j.system == sys.name && j.state.is_active())
+            .map(|j| j.id);
+        SystemInfo {
+            name: sys.name.clone(),
+            mode: if sys.is_host() {
+                SystemMode::Host
+            } else {
+                SystemMode::Nspawn
+            },
+            nspawn: sys.nspawn.clone(),
+            status: if active_build_id.is_some() {
+                SystemStatus::Building
+            } else {
+                SystemStatus::Idle
+            },
+            active_build_id,
+        }
+    }
+
+    /// Append one line to a job's log buffer and stream.
+    async fn emit_log(&self, id: Uuid, line: &str) {
+        let keep = self.inner.config.server.keep_log_lines;
+        let mut jobs = self.inner.jobs.write().await;
+        if let Some(rec) = jobs.get_mut(&id) {
+            rec.push_log(line.to_string(), keep);
+            let _ = rec.bus.send(StreamEvent::Log {
+                line: line.to_string(),
+            });
+        }
+    }
+
+    /// Prepare-phase of a provision job: create the image from scratch
+    /// (stage3, client `make.conf`, profile, binds, `.nspawn`) and start
+    /// the machine. Safe when the image already exists: a lost creation
+    /// race reuses a marked-complete image as-is.
+    async fn provision_prepare(
+        &self,
+        id: Uuid,
+        name: &str,
+        plan: &ProvisionPlan,
+        cancel: &CancellationToken,
+    ) -> Result<(), provision::ProvisionError> {
+        use provision::ProvisionError;
+        let cfg = &self.inner.config;
+        let image = format!("{}{}", cfg.discovery.image_prefix, name);
+        let sys = discover::system_for_image(&image, name, &cfg.discovery.machine_root);
+        if cfg.dry_run() {
+            for line in [
+                format!(">>> provision: create image {image} (dry-run)"),
+                format!(
+                    ">>> provision: make.conf COMMON_FLAGS=\"{}\" (dry-run)",
+                    plan.specs.cflags
+                ),
+                format!(">>> provision: profile {} (dry-run)", plan.specs.profile),
+            ] {
+                self.emit_log(id, &line).await;
+            }
+            return Ok(());
+        }
+        if cancel.is_cancelled() {
+            return Err(ProvisionError::Cancelled);
+        }
+        // Fail fast before downloading gigabytes: the host must already
+        // carry the repo (bind-mounted in; the image never syncs itself).
+        if !std::path::Path::new(provision::HOST_REPO).is_dir() {
+            return Err(ProvisionError::Setup(format!(
+                "host Gentoo repo not found at {}; run emerge --sync on the host first",
+                provision::HOST_REPO
+            )));
+        }
+        let root = sys.machine_path.clone();
+        let complete_marker = root.join(".provisioned");
+        if root.exists() {
+            if complete_marker.exists() {
+                self.emit_log(
+                    id,
+                    &format!(">>> provision: {image} already exists, reusing"),
+                )
+                .await;
+            } else {
+                return Err(ProvisionError::Setup(format!(
+                    "image directory {} exists but is incomplete \
+                     (interrupted provision?); remove it and retry",
+                    root.display()
+                )));
+            }
+        } else {
+            std::fs::create_dir_all(&root)
+                .map_err(|e| ProvisionError::Setup(format!("cannot create image dir: {e}")))?;
+            self.emit_log(
+                id,
+                &format!(
+                    ">>> provision: ensuring stage3 ({})",
+                    cfg.provision.stage3_variant
+                ),
+            )
+            .await;
+            let tarball = provision::ensure_stage3(
+                &cfg.provision.cache_dir,
+                &cfg.provision.stage3_variant,
+                cancel,
+            )
+            .await?;
+            self.emit_log(
+                id,
+                &format!(
+                    ">>> provision: unpacking {}",
+                    tarball.file_name().unwrap_or_default().to_string_lossy()
+                ),
+            )
+            .await;
+            provision::unpack_stage3(&tarball, &root, cancel).await?;
+            if cancel.is_cancelled() {
+                return Err(ProvisionError::Cancelled);
+            }
+            let jobs = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
+            provision::write_image_files(
+                &root,
+                &plan.specs,
+                jobs,
+                std::path::Path::new(provision::HOST_REPO),
+            )?;
+            self.emit_log(id, ">>> provision: wrote make.conf, repos.conf, profile")
+                .await;
+            let binserver = cfg.provision.binserver_root.join(name);
+            std::fs::create_dir_all(&binserver)
+                .map_err(|e| ProvisionError::Setup(format!("cannot create binpkg dir: {e}")))?;
+            std::fs::create_dir_all(provision::HOST_DISTFILES)
+                .map_err(|e| ProvisionError::Setup(format!("cannot create distfiles dir: {e}")))?;
+            provision::write_nspawn_file(
+                std::path::Path::new(provision::NSPAWN_DIR),
+                &image,
+                &binserver,
+            )?;
+            self.emit_log(id, &format!(">>> provision: wrote {image}.nspawn"))
+                .await;
+            let record = format!(
+                "provisioned by gb-server\nchost: {}\ncflags: {}\nprofile: {}\n",
+                plan.specs.chost, plan.specs.cflags, plan.specs.profile
+            );
+            std::fs::write(&complete_marker, record)
+                .map_err(|e| ProvisionError::Setup(format!("cannot mark image complete: {e}")))?;
+        }
+        if cancel.is_cancelled() {
+            return Err(ProvisionError::Cancelled);
+        }
+        self.emit_log(id, &format!(">>> provision: starting machine {image}"))
+            .await;
+        self.inner
+            .runner
+            .ensure_machine_running(&sys)
+            .await
+            .map_err(|e| ProvisionError::Setup(format!("machine {image}: {e}")))?;
+        Ok(())
     }
 
     pub async fn system_active(&self, system: &str) -> Result<SystemActiveBuild, ManagerError> {
@@ -670,20 +877,48 @@ impl Manager {
                     rec.job.targets.clone(),
                     rec.job.emerge_args.clone(),
                     rec.job.auto_fix_conflicts,
+                    rec.job.provision.clone(),
                     rec.cancel.clone(),
                 )),
                 _ => None,
             }
         };
-        let Some((sys_name, targets, emerge_args, auto_fix, cancel)) = claimed else {
+        let Some((sys_name, targets, emerge_args, auto_fix, plan, cancel)) = claimed else {
             return;
         };
         if cancel.is_cancelled() || self.is_draining() {
             self.finish(id, JobState::Cancelled, None).await;
             return;
         }
+        // Provision jobs create the image first, then build @world in it.
+        if let Some(plan) = &plan {
+            match self.provision_prepare(id, &sys_name, plan, &cancel).await {
+                Ok(()) => {}
+                Err(provision::ProvisionError::Cancelled) => {
+                    self.finish(id, JobState::Cancelled, None).await;
+                    return;
+                }
+                Err(e) => {
+                    self.fail(id, format!("provision failed: {e}")).await;
+                    return;
+                }
+            }
+        }
+        if cancel.is_cancelled() || self.is_draining() {
+            self.finish(id, JobState::Cancelled, None).await;
+            return;
+        }
         let sys = match self.resolve_system(&sys_name).await {
             Some(s) => s,
+            // Dry-run never touches discovery: synthesize the fresh image.
+            None if plan.is_some() && self.inner.config.dry_run() => {
+                let cfg = &self.inner.config.discovery;
+                discover::system_for_image(
+                    &format!("{}{}", cfg.image_prefix, sys_name),
+                    &sys_name,
+                    &cfg.machine_root,
+                )
+            }
             None => {
                 self.fail(id, format!("system '{sys_name}' is no longer available"))
                     .await;

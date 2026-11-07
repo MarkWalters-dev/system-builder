@@ -109,6 +109,9 @@ pub struct BuildJob {
     /// Blocking packages the server unmerged to clear the merge, oldest first.
     #[serde(default)]
     pub unmerged_blockers: Vec<String>,
+    /// Set for provision jobs (see [`ProvisionPlan`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<ProvisionPlan>,
     pub state: JobState,
     /// Position in the queue (1-based) while queued, else 0.
     #[serde(default)]
@@ -202,6 +205,56 @@ pub struct SystemActiveBuild {
     pub active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildJob>,
+}
+
+/// Client machine specs for provisioning, gathered by `gb-client` from
+/// `emerge --info` (plus `cpuid2cpuflags` and profile detection). The
+/// server renders these into the new image's `make.conf`, so the image
+/// is compiled from source with the client's own settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientSpecs {
+    /// Target triplet, e.g. `x86_64-pc-linux-gnu`. Must match the
+    /// server's stage3 (amd64 only for now).
+    pub chost: String,
+    /// Full CFLAGS, reused verbatim as the image's `COMMON_FLAGS`.
+    pub cflags: String,
+    /// `CPU_FLAGS_X86` entries, e.g. `["aes", "avx2", "sse4_2"]`.
+    #[serde(default)]
+    pub cpu_flags_x86: Vec<String>,
+    /// Global `USE` flags, e.g. `["ssl", "-X"]`.
+    #[serde(default)]
+    pub use_flags: Vec<String>,
+    /// Gentoo profile path relative to `profiles/`, e.g.
+    /// `default/linux/amd64/23.0/desktop`.
+    pub profile: String,
+}
+
+/// Request body for `POST /v1/systems`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisionRequest {
+    /// System name to create (becomes the `<prefix><name>` image).
+    /// Provisioning is idempotent: when the system already exists the
+    /// response carries it with no job instead of failing.
+    pub name: String,
+    /// Client settings the image is compiled with.
+    pub specs: ClientSpecs,
+}
+
+/// `POST /v1/systems` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisionResponse {
+    pub system: SystemInfo,
+    /// The recompile job, or `None` when the system already existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<BuildJob>,
+}
+
+/// Marks a [`BuildJob`] as a provision recompile: before resolving,
+/// the runner creates the system image from scratch (stage3 + client
+/// `make.conf`), then the job rebuilds `@world` inside it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisionPlan {
+    pub specs: ClientSpecs,
 }
 
 /// Request body for `POST /v1/estimates`.

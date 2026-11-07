@@ -32,6 +32,7 @@ fn fixture_machine(root: &Path, log: &str) -> PathBuf {
 fn test_config(a: PathBuf, b: PathBuf) -> Config {
     Config {
         discovery: Default::default(),
+        provision: Default::default(),
         server: ServerConfig {
             dry_run: true,
             max_concurrent_builds: 1,
@@ -180,6 +181,7 @@ fn stub_setup() -> (tempfile::TempDir, Manager, PathBuf) {
     let machine = fixture_machine(&tmp.path().join("mach"), "");
     let config = Config {
         discovery: Default::default(),
+        provision: Default::default(),
         server: ServerConfig {
             dry_run: false,
             max_concurrent_builds: 1,

@@ -3,7 +3,9 @@
 
 use gb_client::Client;
 use gb_core::config::{Config, ServerConfig, SystemConfig};
-use gb_types::{CreateBuildRequest, EstimateRequest, JobState, StreamEvent};
+use gb_types::{
+    ClientSpecs, CreateBuildRequest, EstimateRequest, JobState, ProvisionRequest, StreamEvent,
+};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +21,7 @@ async fn boot_server() -> (String, tempfile::TempDir) {
     std::fs::write(machine.join("var/log/emerge.log"), LOG).unwrap();
     let config = Config {
         discovery: Default::default(),
+        provision: Default::default(),
         server: ServerConfig {
             dry_run: true,
             max_concurrent_builds: 1,
@@ -86,6 +89,55 @@ async fn submit_watch_and_estimate_over_http() {
         .await
         .unwrap();
     assert_eq!(est.packages[0].estimated_secs, Some(42));
+}
+
+#[tokio::test]
+async fn provision_new_and_existing_systems_over_http() {
+    let (base, _tmp) = boot_server().await;
+    let client = Client::new(&base, 30).unwrap();
+    let specs = ClientSpecs {
+        chost: "x86_64-pc-linux-gnu".into(),
+        cflags: "-march=znver3 -O2 -pipe".into(),
+        cpu_flags_x86: vec!["aes".into()],
+        use_flags: vec!["ssl".into()],
+        profile: "default/linux/amd64/23.0".into(),
+    };
+    // New system: 201 with a recompile job that runs to done in dry-run.
+    let resp = client
+        .provision(&ProvisionRequest {
+            name: "newbox".into(),
+            specs: specs.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(resp.system.name, "newbox");
+    let job = resp.job.expect("new system queues a job");
+    assert_eq!(job.targets, vec!["@world".to_string()]);
+    assert!(job.provision.is_some());
+    let mut saw_provision_log = false;
+    let (state, _) = client
+        .watch(&job.id.to_string(), |ev| {
+            if let StreamEvent::Log { line } = &ev
+                && line.contains(">>> provision:")
+            {
+                saw_provision_log = true;
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(state, JobState::Done);
+    assert!(saw_provision_log);
+
+    // Known system: idempotent, no job.
+    let resp = client
+        .provision(&ProvisionRequest {
+            name: "laptop".into(),
+            specs,
+        })
+        .await
+        .unwrap();
+    assert_eq!(resp.system.name, "laptop");
+    assert!(resp.job.is_none());
 }
 
 #[tokio::test]

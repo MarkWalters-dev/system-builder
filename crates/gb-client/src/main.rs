@@ -6,7 +6,7 @@
 
 use clap::{Parser, Subcommand};
 use gb_client::Client;
-use gb_types::{BuildJob, JobState, StreamEvent};
+use gb_types::{BuildJob, JobState, ProvisionRequest, StreamEvent};
 use std::path::{Path, PathBuf};
 
 const EXIT_API_ERROR: i32 = 1;
@@ -80,6 +80,20 @@ enum Commands {
         /// Run the local emerge via sudo.
         #[arg(long)]
         sudo: bool,
+    },
+    /// Provision a builder image for a new system: sends this machine's
+    /// Portage settings and the server compiles the image from scratch.
+    Provision {
+        /// System name to create. Defaults to this machine's hostname.
+        #[arg(long, env = "GB_SYSTEM")]
+        system: Option<String>,
+        /// Override the detected Gentoo profile (default: read from
+        /// /etc/portage/make.profile).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Submit and exit (prints the job id); default watches the recompile.
+        #[arg(long)]
+        no_watch: bool,
     },
     /// Stream an existing build until it finishes.
     Watch {
@@ -244,6 +258,55 @@ async fn async_main(cli: Cli) -> i32 {
                 notify.clone(),
             )
             .await
+        }
+        Commands::Provision {
+            system,
+            profile,
+            no_watch,
+        } => {
+            let name = system
+                .or(file.system.clone())
+                .or_else(local_hostname)
+                .filter(|s| !s.trim().is_empty());
+            let Some(name) = name else {
+                return need("--system (or set system in the config file)");
+            };
+            let specs = match gb_client::specs::gather_specs(profile) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return EXIT_API_ERROR;
+                }
+            };
+            match client
+                .provision(&ProvisionRequest {
+                    name: name.clone(),
+                    specs,
+                })
+                .await
+            {
+                Ok(resp) => {
+                    if json {
+                        print_json(&resp);
+                        return 0;
+                    }
+                    match resp.job {
+                        None => {
+                            println!("system '{name}' already exists");
+                            0
+                        }
+                        Some(job) => {
+                            println!("provisioning '{name}' as build {}", job.id);
+                            if no_watch {
+                                0
+                            } else {
+                                cmd_watch(&client, json, &job.id.to_string(), notify.clone()).await
+                            }
+                        }
+                    }
+                }
+                Err(e) => api_err(e),
+            }
         }
         Commands::Watch { id } => match resolve_id(&client, id).await {
             Ok(full) => cmd_watch(&client, json, &full, notify.clone()).await,
@@ -1030,6 +1093,45 @@ mod tests {
             matches!(cli.command, Commands::Status { id: Some(_) }),
             "explicit id still parses"
         );
+    }
+
+    #[test]
+    fn provision_parses_with_defaults() {
+        let cli = Cli::try_parse_from(["gb-client", "provision"]).unwrap();
+        assert!(
+            matches!(
+                cli.command,
+                Commands::Provision {
+                    system: None,
+                    profile: None,
+                    no_watch: false,
+                }
+            ),
+            "got {:?}",
+            cli.command
+        );
+        let cli = Cli::try_parse_from([
+            "gb-client",
+            "provision",
+            "--system",
+            "newbox",
+            "--profile",
+            "default/linux/amd64/23.0/desktop",
+            "--no-watch",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Provision {
+                system,
+                profile,
+                no_watch,
+            } => {
+                assert_eq!(system.as_deref(), Some("newbox"));
+                assert_eq!(profile.as_deref(), Some("default/linux/amd64/23.0/desktop"));
+                assert!(no_watch);
+            }
+            other => panic!("expected provision, got {other:?}"),
+        }
     }
 
     #[test]

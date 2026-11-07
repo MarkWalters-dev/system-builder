@@ -22,6 +22,14 @@ keep_log_lines = 20000
 # machine_root = "/var/lib/machines"
 # include_host = true
 
+# Provisioning: `gb-client provision` creates missing builder images from
+# scratch (stage3 + the client's own make.conf) and recompiles @world in
+# them. Only the stage3 variant usually matters.
+# [provision]
+# stage3_variant = "openrc"   # or "systemd"
+# cache_dir = "/var/cache/system-builder"
+# binserver_root = "/var/binserver"
+
 # Explicit systems are optional: they add to (or override by name) the
 # discovered set. Only needed for custom paths or unusual setups.
 # [[systems]]

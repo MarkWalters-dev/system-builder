@@ -9,7 +9,8 @@ use axum::routing::{get, post};
 use gb_core::{Manager, ManagerError};
 use gb_types::{
     ApiError, BuildLog, BuildSummary, CreateBuildRequest, EstimateRequest, EstimateResponse,
-    HistoryResponse, JobState, QueueStatus, StreamEvent, SystemActiveBuild, SystemInfo,
+    HistoryResponse, JobState, ProvisionRequest, ProvisionResponse, QueueStatus, StreamEvent,
+    SystemActiveBuild, SystemInfo,
 };
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -32,7 +33,7 @@ pub fn router(manager: Manager) -> Router {
         .route("/v1/builds/{id}/log", get(get_log))
         .route("/v1/builds/{id}/stream", get(stream_build))
         .route("/v1/queue", get(get_queue))
-        .route("/v1/systems", get(list_systems))
+        .route("/v1/systems", get(list_systems).post(provision_system))
         .route("/v1/systems/{system}/active", get(system_active))
         .route("/v1/estimates", post(estimate))
         .route("/v1/history", get(history))
@@ -58,6 +59,7 @@ fn manager_err(e: ManagerError) -> (StatusCode, Json<ApiError>) {
         ManagerError::EmptyTargets => err(StatusCode::BAD_REQUEST, "no targets to build"),
         ManagerError::UnknownJob(id) => err(StatusCode::NOT_FOUND, format!("unknown build '{id}'")),
         ManagerError::AlreadyFinished => err(StatusCode::CONFLICT, "build is already finished"),
+        ManagerError::InvalidProvision(msg) => err(StatusCode::BAD_REQUEST, msg),
         ManagerError::Internal(msg) => err(StatusCode::INTERNAL_SERVER_ERROR, msg),
     }
 }
@@ -150,6 +152,25 @@ async fn get_queue(State(state): State<AppState>) -> Json<QueueStatus> {
 
 async fn list_systems(State(state): State<AppState>) -> Json<Vec<SystemInfo>> {
     Json(state.manager.systems().await)
+}
+
+async fn provision_system(
+    State(state): State<AppState>,
+    Json(req): Json<ProvisionRequest>,
+) -> impl IntoResponse {
+    match state.manager.provision(req).await {
+        Ok(resp @ ProvisionResponse { .. }) => {
+            // 201 when a recompile job was queued, 200 when the system
+            // already existed (idempotent).
+            let status = if resp.job.is_some() {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            };
+            (status, Json(serde_json::to_value(&resp).unwrap())).into_response()
+        }
+        Err(e) => manager_err(e).into_response(),
+    }
 }
 
 async fn system_active(

@@ -26,6 +26,10 @@ pub struct Config {
     /// discovered set — rarely needed.
     #[serde(default)]
     pub systems: Vec<SystemConfig>,
+    /// Image provisioning (`POST /v1/systems`): stage3 source, cache,
+    /// and per-system binpkg location for new builder images.
+    #[serde(default)]
+    pub provision: ProvisionConfig,
 }
 
 fn default_max_concurrent() -> usize {
@@ -123,6 +127,46 @@ impl Default for ServerConfig {
     }
 }
 
+/// Image provisioning for systems that don't exist yet. `gb-client
+/// provision` sends client specs; the server unpacks a stage3, writes a
+/// client-tuned `make.conf`, and recompiles `@world` inside the image.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProvisionConfig {
+    /// stage3 variant for new images: `openrc` or `systemd`.
+    #[serde(default = "default_stage3_variant")]
+    pub stage3_variant: String,
+    /// Stage3 tarballs are downloaded once and cached here.
+    #[serde(default = "default_provision_cache")]
+    pub cache_dir: PathBuf,
+    /// Per-system binpkgs live at `<root>/<system>`, bound to
+    /// `/var/cache/binpkgs` inside the image.
+    #[serde(default = "default_binserver_root")]
+    pub binserver_root: PathBuf,
+}
+
+fn default_stage3_variant() -> String {
+    "openrc".to_string()
+}
+
+fn default_provision_cache() -> PathBuf {
+    PathBuf::from("/var/cache/system-builder")
+}
+
+fn default_binserver_root() -> PathBuf {
+    PathBuf::from("/var/binserver")
+}
+
+impl Default for ProvisionConfig {
+    fn default() -> Self {
+        Self {
+            stage3_variant: default_stage3_variant(),
+            cache_dir: default_provision_cache(),
+            binserver_root: default_binserver_root(),
+        }
+    }
+}
+
 /// One buildable system: either a systemd-nspawn container or the host.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -184,6 +228,7 @@ fn join_root(root: &Path, target_abs: &Path) -> PathBuf {
 pub fn template() -> String {
     let server = ServerConfig::default();
     let discovery = DiscoveryConfig::default();
+    let provision = ProvisionConfig::default();
     format!(
         r#"# gb-server configuration.
 # Generated on first run with every option present and all defaults commented out.
@@ -216,6 +261,17 @@ pub fn template() -> String {
 # Also register the local host (by hostname) as a non-nspawn system.
 # include_host = {include_host}
 
+# Provisioning: `gb-client provision` creates missing builder images from
+# scratch (stage3 + client make.conf) and recompiles @world inside them.
+# [provision]
+# stage3 variant for new images: "openrc" or "systemd".
+# stage3_variant = "{stage3_variant}"
+# Stage3 tarballs are downloaded once and cached here.
+# cache_dir = "{cache_dir}"
+# Per-system binpkgs live at <binserver_root>/<system>, bound to
+# /var/cache/binpkgs inside the image.
+# binserver_root = "{binserver_root}"
+
 # Explicit systems are optional: they add to (or override by name) the
 # discovered set. Only needed for custom paths or unusual setups.
 # [[systems]]
@@ -239,6 +295,9 @@ pub fn template() -> String {
         image_prefix = discovery.image_prefix,
         machine_root = discovery.machine_root.display(),
         include_host = discovery.include_host,
+        stage3_variant = provision.stage3_variant,
+        cache_dir = provision.cache_dir.display(),
+        binserver_root = provision.binserver_root.display(),
     )
 }
 
@@ -257,6 +316,12 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "max_concurrent_builds must be >= 1".to_string(),
             ));
+        }
+        if self.provision.stage3_variant != "openrc" && self.provision.stage3_variant != "systemd" {
+            return Err(ConfigError::Invalid(format!(
+                "provision.stage3_variant must be \"openrc\" or \"systemd\", got {:?}",
+                self.provision.stage3_variant
+            )));
         }
         if !self.discovery.enabled && self.systems.is_empty() {
             return Err(ConfigError::Invalid(
