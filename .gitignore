@@ -1,4 +1,6 @@
 target/
+# Release tarballs built by `make package` (see scripts/package.sh).
+dist/
 # Local server config (copied from config.example.toml; never commit).
 config.toml
 # Redirected server logs.

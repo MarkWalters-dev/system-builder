@@ -177,6 +177,34 @@ for their emerge trees to die before exiting, so killing the server never
 leaves orphaned builds behind. (Jobs live in memory, so anything running
 is lost on restart either way.)
 
+## Install from mw-overlay
+
+On Gentoo, the easiest path is the [`mw` overlay](https://github.com/MarkWalters-dev/mw-overlay),
+which carries `app-portage/system-builder` as a 9999 live ebuild tracking
+git — no versions to follow, just re-emerge to update
+(`emerge --oneshot app-portage/system-builder`):
+
+```sh
+# one-time overlay setup (as root)
+eselect repository add mw git https://github.com/MarkWalters-dev/mw-overlay.git
+emaint sync -r mw
+
+# builder host: server + client, then enable the service
+emerge app-portage/system-builder
+systemctl enable --now system-builder
+
+# client machines: gb-client only
+echo "app-portage/system-builder -server" >>/etc/portage/package.use/system-builder
+emerge app-portage/system-builder
+```
+
+The ebuild installs both binaries to `/usr/bin`, the
+`system-builder.service` unit, and seeds `/etc/system-builder/config.toml`
+(CONFIG_PROTECTed, so updates never clobber your edits). `USE=-server`
+skips building the server and its dependencies entirely. See the
+[overlay README](https://github.com/MarkWalters-dev/mw-overlay) for
+setup alternatives (SSH, manual `repos.conf`).
+
 ## Client CLI
 
 `gb-client` runs on the client machines. It submits a remote build, streams it,
@@ -239,7 +267,9 @@ a failed ping only warns on stderr and never changes the exit code.
 
 Exit codes: `0` ok · `1` API/usage error · `2` remote build failed or
 cancelled · `3` local emerge failed. Install it on clients with
-`./install.sh client` (as root) or `make install-client`, or copy the
+`./install.sh client` (as root), `make install-client`,
+`USE=-server emerge app-portage/system-builder` from
+[mw-overlay](https://github.com/MarkWalters-dev/mw-overlay), or copy the
 `gb-client` binary over.
 
 ## API

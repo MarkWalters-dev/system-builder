@@ -7,7 +7,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 fn usage() -> ! {
-    eprintln!("usage: gb-server [--config <path>]");
+    eprintln!("usage: gb-server [--config <path>] [--version]");
     eprintln!("  without --config, the first existing file wins:");
     eprintln!("    ./config.toml");
     eprintln!("    $HOME/.config/gb-server/config.toml");
@@ -24,6 +24,10 @@ fn config_path() -> PathBuf {
                 explicit = Some(args.next().map(PathBuf::from).unwrap_or_else(|| usage()));
             }
             "-h" | "--help" => usage(),
+            "-V" | "--version" => {
+                println!("gb-server {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             other => {
                 eprintln!("unknown argument: {other}");
                 usage();

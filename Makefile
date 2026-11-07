@@ -5,6 +5,8 @@
 #   make install-server   install gb-server + seed config + systemd unit if missing,
 #                         then enable/start (restarts if already running)
 #   make install-client   install gb-client CLI only
+#   make package          release binary tarball in dist/ for GitHub
+#                         releases (see scripts/package.sh)
 #
 # Run make as your normal user -- never `sudo make`. Cargo builds always run
 # unprivileged; only the install steps escalate via $(SUDO).
@@ -15,11 +17,15 @@
 #   ENABLE=yes          set ENABLE=no to install files without enabling/starting
 #   SUDO=sudo           privilege prefix for live installs (auto-empty when
 #                       staging or already root; SUDO= forces no escalation)
+#   PACKAGE_ARGS=...    args for scripts/package.sh (--allow-dirty to
+#                       package HEAD with uncommitted changes present,
+#                       --upload to tag, push, and publish the release)
 
 PREFIX  ?= /usr/local
 DESTDIR ?=
 ENABLE  ?= yes
 SUDO    ?= sudo
+PACKAGE_ARGS ?=
 
 # No escalation needed when staging or already root. (Plain assignments
 # below never override a SUDO passed on the command line.)
@@ -38,7 +44,7 @@ UNIT    := $(SYSDIR)/system-builder.service
 SERVICE_SRC := packaging/system-builder.service
 CONFIG_SRC  := config.example.toml
 
-.PHONY: debug release install-server install-client clean help
+.PHONY: debug release install-server install-client package clean help
 
 debug:
 	cargo build
@@ -96,9 +102,12 @@ install-client: release
 	@echo "    set the server there or export GB_SERVER, then:"
 	@echo "    gb-client systems"
 
+package:
+	scripts/package.sh $(PACKAGE_ARGS)
+
 clean:
 	cargo clean
 
 help:
-	@echo "Targets: debug release install-server install-client clean help"
-	@echo "Vars:    PREFIX=$(PREFIX) DESTDIR='$(DESTDIR)' ENABLE=$(ENABLE) SUDO='$(SUDO)'"
+	@echo "Targets: debug release install-server install-client package clean help"
+	@echo "Vars:    PREFIX=$(PREFIX) DESTDIR='$(DESTDIR)' ENABLE=$(ENABLE) SUDO='$(SUDO)' PACKAGE_ARGS='$(PACKAGE_ARGS)'"
