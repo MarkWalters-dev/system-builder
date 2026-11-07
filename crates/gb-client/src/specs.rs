@@ -23,13 +23,15 @@ pub enum SpecsError {
     Missing(String),
 }
 
-/// Parsed `emerge --info` subset. `cpu_flags_x86` is `None` when the key
-/// is absent or blank (caller falls back to `cpuid2cpuflags`).
+/// Parsed `emerge --info` subset. The CPU flag fields are `None` when
+/// their key is absent or blank (caller falls back to `cpuid2cpuflags`
+/// on x86, `/proc/cpuinfo` on ARM).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct EmergeInfo {
     pub chost: Option<String>,
     pub cflags: Option<String>,
     pub cpu_flags_x86: Option<Vec<String>>,
+    pub cpu_flags_arm: Option<Vec<String>>,
     pub use_flags: Vec<String>,
 }
 
@@ -46,6 +48,10 @@ pub fn parse_emerge_info(text: &str) -> EmergeInfo {
                 "CPU_FLAGS_X86" => {
                     let flags: Vec<String> = value.split_whitespace().map(str::to_string).collect();
                     info.cpu_flags_x86 = if flags.is_empty() { None } else { Some(flags) };
+                }
+                "CPU_FLAGS_ARM" => {
+                    let flags: Vec<String> = value.split_whitespace().map(str::to_string).collect();
+                    info.cpu_flags_arm = if flags.is_empty() { None } else { Some(flags) };
                 }
                 "USE" => {
                     info.use_flags = value.split_whitespace().map(str::to_string).collect();
@@ -127,6 +133,59 @@ pub fn profile_from_link_target(target: &str) -> Option<String> {
     Some(rel.trim_end_matches('/').to_string())
 }
 
+/// Derive `CPU_FLAGS_ARM` from `/proc/cpuinfo` when `emerge --info`
+/// has none. Conservative subset: exact feature-name matches, plus
+/// `asimd → neon` and the `CPU architecture` line (`v7`/`v8`). Features
+/// are intersected across cores (safe on big.LITTLE); missing flags
+/// only cost optimization, never correctness. Set `CPU_FLAGS_ARM`
+/// explicitly for full control.
+pub fn arm_flags_from_cpuinfo(text: &str) -> Vec<String> {
+    use std::collections::HashSet;
+    const EXACT: &[&str] = &[
+        "aes", "asimd", "asimddp", "asimdhp", "crc32", "i8mm", "sha1", "sha2", "sm4", "sve", "sve2",
+    ];
+    let mut cores: Vec<HashSet<String>> = Vec::new();
+    let mut arch = String::new();
+    for line in text.lines() {
+        if let Some(list) = cpuinfo_value(line, "Features") {
+            cores.push(list.split_whitespace().map(str::to_string).collect());
+        } else if let Some(value) = cpuinfo_value(line, "CPU architecture") {
+            arch = value
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+        }
+    }
+    let mut common: HashSet<String> = cores.first().cloned().unwrap_or_default();
+    for core in cores.iter().skip(1) {
+        common.retain(|f| core.contains(f));
+    }
+    let mut flags: Vec<String> = EXACT
+        .iter()
+        .filter(|f| common.contains(**f))
+        .map(|f| f.to_string())
+        .collect();
+    if common.contains("asimd") {
+        flags.push("neon".to_string());
+    }
+    match arch.as_str() {
+        "8" => flags.push("v8".to_string()),
+        "7" => flags.push("v7".to_string()),
+        _ => {}
+    }
+    flags.sort();
+    flags.dedup();
+    flags
+}
+
+/// Value of a `Key : value` line in `/proc/cpuinfo`, if it matches.
+fn cpuinfo_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let rest = line.trim_start().strip_prefix(key)?;
+    let rest = rest.trim_start().strip_prefix(':')?;
+    Some(rest.trim())
+}
+
 /// Concrete `-march` value from `gcc -march=native -Q --help=target`.
 pub fn gcc_march_from_help(text: &str) -> Option<String> {
     for line in text.lines() {
@@ -188,7 +247,9 @@ pub fn detect_profile() -> Result<String, SpecsError> {
 }
 
 /// Gather this machine's specs for a provision request. Fails loudly
-/// outside Gentoo (no `emerge`) or without CPU flag sources.
+/// outside Gentoo (no `emerge`). CPU flags come from `emerge --info`
+/// when set, else from `cpuid2cpuflags` (x86) or `/proc/cpuinfo` (ARM);
+/// the other arch's list stays empty.
 pub fn gather_specs(profile_override: Option<String>) -> Result<ClientSpecs, SpecsError> {
     let info_text = run_capture("emerge", &["--info"]).map_err(|e| match e {
         SpecsError::Command(_, _) => SpecsError::Missing(
@@ -203,9 +264,12 @@ pub fn gather_specs(profile_override: Option<String>) -> Result<ClientSpecs, Spe
     let cflags = info.cflags.ok_or_else(|| {
         SpecsError::Parse("emerge --info".to_string(), "no CFLAGS found".to_string())
     })?;
+    // Each arch's fallback only runs on matching hardware; a Pi never
+    // consults cpuid2cpuflags and an x86 box never reads ARM features.
+    let host = std::env::consts::ARCH;
     let cpu_flags_x86 = match info.cpu_flags_x86 {
         Some(flags) => flags,
-        None => {
+        None if host == "x86" || host == "x86_64" => {
             let out = run_capture("cpuid2cpuflags", &[]).map_err(|e| match e {
                 SpecsError::Command(_, _) => SpecsError::Missing(
                     "no CPU_FLAGS_X86 in emerge --info and cpuid2cpuflags is missing \
@@ -216,6 +280,20 @@ pub fn gather_specs(profile_override: Option<String>) -> Result<ClientSpecs, Spe
             })?;
             parse_cpu_flags_output(&out)
         }
+        None => Vec::new(),
+    };
+    let cpu_flags_arm = match info.cpu_flags_arm {
+        Some(flags) => flags,
+        None if host == "aarch64" || host == "arm" => {
+            let text = std::fs::read_to_string("/proc/cpuinfo").map_err(|e| {
+                SpecsError::Missing(format!(
+                    "no CPU_FLAGS_ARM in emerge --info and cannot read /proc/cpuinfo ({e}); \
+                     set CPU_FLAGS_ARM in make.conf"
+                ))
+            })?;
+            arm_flags_from_cpuinfo(&text)
+        }
+        None => Vec::new(),
     };
     let profile = match profile_override {
         Some(p) => p,
@@ -226,6 +304,7 @@ pub fn gather_specs(profile_override: Option<String>) -> Result<ClientSpecs, Spe
         chost,
         cflags,
         cpu_flags_x86,
+        cpu_flags_arm,
         use_flags: info.use_flags,
         profile,
     })
@@ -251,9 +330,63 @@ mod tests {
                 chost: Some("x86_64-pc-linux-gnu".into()),
                 cflags: Some("-march=znver3 -O2 -pipe".into()),
                 cpu_flags_x86: Some(vec!["aes".into(), "avx2".into(), "sse4_2".into()]),
+                cpu_flags_arm: None,
                 use_flags: vec!["X".into(), "ssl".into(), "-gtk".into()],
             }
         );
+    }
+
+    #[test]
+    fn emerge_info_parses_arm_keys() {
+        let info = parse_emerge_info(
+            "CHOST=\"aarch64-unknown-linux-gnu\" CFLAGS=\"-march=cortex-a72 -O2 -pipe\" \
+             CPU_FLAGS_ARM=\"aes crc32 neon\" USE=\"ssl\"\n",
+        );
+        assert_eq!(info.chost.as_deref(), Some("aarch64-unknown-linux-gnu"));
+        assert_eq!(info.cpu_flags_x86, None);
+        assert_eq!(
+            info.cpu_flags_arm,
+            Some(vec![
+                "aes".to_string(),
+                "crc32".to_string(),
+                "neon".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn cpuinfo_yields_conservative_arm_subset() {
+        // Pi 4-shaped cpuinfo: Cortex-A72, ARMv8.
+        let text = "processor\t: 0\n\
+            Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp\n\
+            CPU implementer\t: 0x41\n\
+            CPU architecture: 8\n\
+            CPU variant\t: 0x0\n\
+            CPU part\t: 0xd08\n\
+            CPU revision\t: 3\n\
+            \n\
+            processor\t: 1\n\
+            Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp\n\
+            CPU implementer\t: 0x41\n\
+            CPU architecture: 8\n";
+        assert_eq!(
+            arm_flags_from_cpuinfo(text),
+            vec![
+                "aes", "asimd", "asimdhp", "crc32", "neon", "sha1", "sha2", "v8"
+            ]
+        );
+    }
+
+    #[test]
+    fn cpuinfo_intersects_heterogeneous_cores() {
+        let text = "Features\t: fp asimd aes sve\nCPU architecture: 8\n\
+            Features\t: fp asimd aes\nCPU architecture: 8\n";
+        // sve is dropped: not every core has it.
+        assert_eq!(
+            arm_flags_from_cpuinfo(text),
+            vec!["aes", "asimd", "neon", "v8"]
+        );
+        assert!(arm_flags_from_cpuinfo("nothing useful here").is_empty());
     }
 
     #[test]

@@ -221,6 +221,9 @@ pub struct ClientSpecs {
     /// `CPU_FLAGS_X86` entries, e.g. `["aes", "avx2", "sse4_2"]`.
     #[serde(default)]
     pub cpu_flags_x86: Vec<String>,
+    /// `CPU_FLAGS_ARM` entries, e.g. `["aes", "crc32", "neon"]`.
+    #[serde(default)]
+    pub cpu_flags_arm: Vec<String>,
     /// Global `USE` flags, e.g. `["ssl", "-X"]`.
     #[serde(default)]
     pub use_flags: Vec<String>,

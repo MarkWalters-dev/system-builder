@@ -216,7 +216,9 @@ gb-client provision --system laptop    # or pick a name explicitly
 
 The client sends its Portage settings — `CHOST`, `CFLAGS` (a literal
 `-march=native` is resolved to the concrete CPU via gcc first),
-`CPU_FLAGS_X86` (from `emerge --info`, else `cpuid2cpuflags`), global
+`CPU_FLAGS_X86` (from `emerge --info`, else `cpuid2cpuflags`) or
+`CPU_FLAGS_ARM` (from `emerge --info`, else a conservative
+`/proc/cpuinfo` subset — set it explicitly for full control), global
 `USE`, and the active profile — and the server creates
 `gentoo-builder-<name>` from scratch, then recompiles `@world` from
 source inside it with those exact settings. No foreign binpkgs: the
@@ -238,7 +240,23 @@ Fresh-host prerequisites: a synced host repo at `/var/db/repos/gentoo`
 (the image bind-mounts it and never syncs itself), root for the
 server, and systemd with `machinectl`. Tune under `[provision]`
 (`stage3_variant = "openrc"` or `"systemd"`, `cache_dir`,
-`binserver_root`). amd64 only for now.
+`binserver_root`).
+
+### Raspberry Pi / ARM clients
+
+Pi clients provision exactly like any other: `gb-client provision` on
+the Pi sends its `aarch64-unknown-linux-gnu` settings and the server
+builds an ARM image from an arm64 stage3. ARM images run under the
+same nspawn setup via qemu-user — KVM is same-arch only, so there is
+no ARM KVM on an amd64 host, and no VM control plane is needed: boot,
+`nsenter`, and log reads all work unchanged. The server host needs
+`app-emulation/qemu` with `USE=static-user` plus the `qemu-aarch64`
+binfmt_misc handler registered (link
+`/usr/share/qemu/binfmt.d/qemu.conf` into `/etc/binfmt.d/` and restart
+`systemd-binfmt`); provisioning fails with instructions when either is
+missing. Expect the first `@world` recompile to take much longer than
+native — emulation is roughly an order of magnitude slower — but it
+only happens once per image.
 
 ## Client CLI
 

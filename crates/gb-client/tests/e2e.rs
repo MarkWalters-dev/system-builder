@@ -99,6 +99,7 @@ async fn provision_new_and_existing_systems_over_http() {
         chost: "x86_64-pc-linux-gnu".into(),
         cflags: "-march=znver3 -O2 -pipe".into(),
         cpu_flags_x86: vec!["aes".into()],
+        cpu_flags_arm: vec![],
         use_flags: vec!["ssl".into()],
         profile: "default/linux/amd64/23.0".into(),
     };

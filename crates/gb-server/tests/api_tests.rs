@@ -351,9 +351,9 @@ async fn provision_rejects_bad_requests() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    // Non-amd64 CHOST.
+    // Unsupported CHOST.
     let mut specs = specs_fixture();
-    specs["chost"] = json!("aarch64-unknown-linux-gnu");
+    specs["chost"] = json!("x86_64-pc-linux-musl");
     let resp = app
         .clone()
         .oneshot(post_json(
@@ -374,4 +374,33 @@ async fn provision_rejects_bad_requests() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn provision_arm_system_accepted() {
+    let (_t, app) = setup();
+    let resp = app
+        .oneshot(post_json(
+            "/v1/systems",
+            json!({
+                "name": "pi",
+                "specs": {
+                    "chost": "aarch64-unknown-linux-gnu",
+                    "cflags": "-march=cortex-a72 -O2 -pipe",
+                    "cpu_flags_arm": ["aes", "crc32", "neon"],
+                    "use_flags": ["ssl"],
+                    "profile": "default/linux/arm64/23.0",
+                },
+            }),
+        ))
+        .await
+        .unwrap();
+    let (status, created) = body_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["system"]["nspawn"], "gentoo-builder-pi");
+    assert_eq!(created["job"]["targets"], json!(["@world"]));
+    assert_eq!(
+        created["job"]["provision"]["specs"]["cpu_flags_arm"],
+        json!(["aes", "crc32", "neon"])
+    );
 }

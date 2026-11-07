@@ -360,9 +360,15 @@ impl Manager {
         let cfg = &self.inner.config;
         let image = format!("{}{}", cfg.discovery.image_prefix, name);
         let sys = discover::system_for_image(&image, name, &cfg.discovery.machine_root);
+        // Validated at the POST boundary; the fallback is unreachable.
+        let arch =
+            provision::arch_from_chost(&plan.specs.chost).unwrap_or(provision::ImageArch::Amd64);
         if cfg.dry_run() {
             for line in [
-                format!(">>> provision: create image {image} (dry-run)"),
+                format!(
+                    ">>> provision: create image {image} for {} (dry-run)",
+                    plan.specs.chost
+                ),
                 format!(
                     ">>> provision: make.conf COMMON_FLAGS=\"{}\" (dry-run)",
                     plan.specs.cflags
@@ -383,6 +389,9 @@ impl Manager {
                 "host Gentoo repo not found at {}; run emerge --sync on the host first",
                 provision::HOST_REPO
             )));
+        }
+        if arch == provision::ImageArch::Arm64 {
+            provision::check_arm_host_ready()?;
         }
         let root = sys.machine_path.clone();
         let complete_marker = root.join(".provisioned");
@@ -413,6 +422,7 @@ impl Manager {
             .await;
             let tarball = provision::ensure_stage3(
                 &cfg.provision.cache_dir,
+                arch,
                 &cfg.provision.stage3_variant,
                 cancel,
             )
@@ -428,6 +438,11 @@ impl Manager {
             provision::unpack_stage3(&tarball, &root, cancel).await?;
             if cancel.is_cancelled() {
                 return Err(ProvisionError::Cancelled);
+            }
+            if arch == provision::ImageArch::Arm64 {
+                provision::install_qemu_user(&root)?;
+                self.emit_log(id, ">>> provision: installed qemu-user for ARM")
+                    .await;
             }
             let jobs = std::thread::available_parallelism()
                 .map(|n| n.get())
