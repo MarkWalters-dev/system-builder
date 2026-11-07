@@ -1,0 +1,18 @@
+[Unit]
+Description=Gentoo system-builder API
+Documentation=https://example.com/system-builder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gb-server --config /etc/system-builder/config.toml
+Restart=on-failure
+RestartSec=5
+# Runs as root on purpose: it must drive machinectl/systemd-run into the
+# nspawn builders, read their logs, and sync /etc/portage into them.
+# No ProtectSystem/sandboxing for the same reason: the machine roots and the
+# state dir must stay writable.
+
+[Install]
+WantedBy=multi-user.target

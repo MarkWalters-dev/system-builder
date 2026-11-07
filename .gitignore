@@ -1,0 +1,5 @@
+target/
+# Local server config (copied from config.example.toml; never commit).
+config.toml
+# Redirected server logs.
+*.log

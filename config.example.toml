@@ -1,0 +1,30 @@
+# system-builder example config.
+# Copy to config.toml (or /etc/system-builder/config.toml) and edit.
+# Builders are discovered automatically; no [[systems]] needed normally.
+
+[server]
+bind = "127.0.0.1:8080"
+# Global build slots. 1 = one build at a time across ALL systems;
+# further requests queue FIFO. A system never runs 2 builds at once
+# regardless of this value.
+max_concurrent_builds = 1
+keep_finished_jobs = 50
+keep_log_lines = 20000
+# dry_run = true  # or env SYSTEM_BUILDER_DRY_RUN=1: fake builds, no emerge
+
+# Discovery: build VMs are found via `machinectl list-images` by prefix
+# (gentoo-builder-laptop -> system "laptop"), files live under
+# /var/lib/machines/<image>, and the local host is registered too.
+# Uncomment to change or disable.
+# [discovery]
+# enabled = true
+# image_prefix = "gentoo-builder-"
+# machine_root = "/var/lib/machines"
+# include_host = true
+
+# Explicit systems are optional: they add to (or override by name) the
+# discovered set. Only needed for custom paths or unusual setups.
+# [[systems]]
+# name = "laptop"
+# nspawn = "gentoo-builder-laptop"
+# machine_path = "/var/lib/machines/gentoo-builder-laptop"

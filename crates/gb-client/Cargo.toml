@@ -1,0 +1,36 @@
+[package]
+name = "gb-client"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "gb-client"
+path = "src/main.rs"
+
+[lib]
+name = "gb_client"
+path = "src/lib.rs"
+
+[dependencies]
+gb-types = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+toml = { workspace = true }
+uuid = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+futures-util = "0.3"
+
+[dev-dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+gb-server = { workspace = true }
+gb-core = { workspace = true }
+tempfile = "3"
+serde_json = "1"
